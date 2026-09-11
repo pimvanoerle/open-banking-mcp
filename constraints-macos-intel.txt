@@ -1,0 +1,8 @@
+# cryptography dropped macOS x86_64 (Intel) wheels at 49.0.0; newer versions
+# need a Rust toolchain to build from source. Intel Mac users can install with:
+#
+#   pip install -e ".[dev]" -c constraints-macos-intel.txt
+#
+# This is a local build workaround, deliberately NOT pinned in pyproject.toml --
+# everyone else should get current cryptography security updates.
+cryptography<49

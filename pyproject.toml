@@ -1,0 +1,33 @@
+[project]
+name = "open-banking-mcp"
+version = "0.1.0"
+description = "MCP server for querying UK bank accounts via Open Banking (TrueLayer Data API)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Pim van Oerle" }]
+keywords = ["mcp", "open-banking", "truelayer", "fintech"]
+
+dependencies = [
+    "mcp>=2.0,<3",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "typer>=0.12",
+    "keyring>=25.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "respx>=0.21"]
+
+[project.scripts]
+open-banking-mcp = "open_banking_mcp.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["open_banking_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
