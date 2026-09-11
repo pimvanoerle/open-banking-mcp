@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import typer
 
 from .auth import AuthError, TokenManager, authorize
+from .cache import Cache
+from .client import TrueLayerClient
 from .config import ConfigError, load_settings
+from .service import DataService
 from .storage import KeyringTokenStore, build_store
 
 app = typer.Typer(
@@ -99,6 +103,78 @@ def logout(
         raise typer.Exit(1)
     store.delete(provider_id)
     typer.secho(f"Removed {provider_id}.", fg=typer.colors.GREEN)
+
+
+def _service(settings, store):
+    client = TrueLayerClient(settings, TokenManager(settings, store), psu_ip=settings.psu_ip)
+    return DataService(
+        client, Cache(settings.cache_file), max_age=timedelta(hours=settings.max_age_hours)
+    )
+
+
+@app.command()
+def sync(
+    provider_id: str = typer.Argument(None, help="Bank to sync. Defaults to all connected."),
+    history_days: int = typer.Option(None, help="How far back to pull. Defaults to config."),
+) -> None:
+    """Pull bank data into the local cache. Run this daily."""
+    settings, store = _load()
+    targets = [provider_id] if provider_id else store.providers()
+    if not targets:
+        typer.echo("No banks connected. Run 'open-banking-mcp auth' first.")
+        raise typer.Exit(1)
+
+    service = _service(settings, store)
+    failed = False
+    for target in targets:
+        typer.echo(f"Syncing {target}...")
+        try:
+            report = asyncio.run(
+                service.sync(target, history_days=history_days or settings.history_days)
+            )
+        except Exception as exc:
+            typer.secho(f"  failed: {exc}", fg=typer.colors.RED, err=True)
+            failed = True
+            continue
+
+        typer.secho(
+            f"  {report.accounts} accounts, {report.cards} cards, "
+            f"{report.transactions} transactions, {report.pending} pending",
+            fg=typer.colors.GREEN if report.ok else typer.colors.YELLOW,
+        )
+        for err in report.errors:
+            typer.secho(f"  ! {err}", fg=typer.colors.YELLOW, err=True)
+        failed = failed or not report.ok
+
+    raise typer.Exit(1 if failed else 0)
+
+
+@app.command()
+def cache() -> None:
+    """Show what the local cache holds."""
+    settings, store = _load()
+    stats = Cache(settings.cache_file).stats()
+    run = Cache(settings.cache_file).last_run()
+
+    typer.echo(f"Transactions: {stats['transactions']} ({stats['pending']} pending)")
+    if stats["earliest"]:
+        typer.echo(f"Range:        {stats['earliest'][:10]} to {stats['latest'][:10]}")
+    typer.echo(f"Snapshots:    {stats['snapshots']}")
+    typer.echo(f"Size:         {stats['db_bytes'] / 1e6:.1f} MB")
+    if run:
+        colour = typer.colors.GREEN if run["status"] == "ok" else typer.colors.RED
+        typer.echo(f"Last sync:    {run['finished_at'] or run['started_at']} ", nl=False)
+        typer.secho(run["status"], fg=colour)
+    else:
+        typer.secho("Last sync:    never", fg=typer.colors.YELLOW)
+
+
+@app.command()
+def serve() -> None:
+    """Run the MCP server on stdio (this is what MCP clients launch)."""
+    from .server import main as serve_main
+
+    serve_main()
 
 
 if __name__ == "__main__":

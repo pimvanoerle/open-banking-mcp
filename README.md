@@ -8,7 +8,8 @@ Nationwide, Santander and most other UK banks.
 Read-only by design: this server requests Data API scopes only. There is no
 code path here that can move money.
 
-> **Status:** early. The OAuth layer and CLI work; the MCP tools are next.
+> **Status:** working against TrueLayer's sandbox. Not yet tried against a
+> real bank connection.
 
 ## Setup
 
@@ -45,6 +46,10 @@ Optional:
 | `TRUELAYER_PROVIDERS` | `uk-cs-mock` (sandbox) | Which banks to offer at consent |
 | `TRUELAYER_USE_KEYRING` | `1` | Set `0` to store tokens in a file |
 | `TRUELAYER_TOKEN_FILE` | `~/.open-banking-mcp/tokens.json` | Implies file storage |
+| `TRUELAYER_CACHE_FILE` | `~/.open-banking-mcp/cache.db` | Local SQLite cache |
+| `TRUELAYER_MAX_AGE_HOURS` | `25` | Age past which cached data is flagged stale |
+| `TRUELAYER_HISTORY_DAYS` | `365` | How far back a full sync pulls |
+| `TRUELAYER_PSU_IP` | unset | End user's IP; lifts rate limits for user-present calls |
 
 ### 3. Connect a bank
 
@@ -63,6 +68,90 @@ different account shapes. Note that the sandbox reports its provider id as
 ```bash
 open-banking-mcp status          # connected banks + consent countdown
 open-banking-mcp logout uk-ob-monzo
+```
+
+## How it reads data
+
+Every read is served from a **local SQLite cache** by default, refreshed by a
+daily sync. This is not just a speed trick: TrueLayer caches responses for an
+hour and throttles unattended callers to roughly 4 calls a day unless the
+request carries an `X-PSU-IP` header saying a human is present. An agent
+checking your accounts on a schedule is exactly the throttled case, so it reads
+from the cache instead.
+
+```bash
+open-banking-mcp sync     # pull everything; run this daily
+open-banking-mcp cache    # what's stored, and when it last synced
+```
+
+Every response says how old it is:
+
+```json
+{
+  "data": { "current": 12.0, "available": 112.0, "currency": "GBP" },
+  "as_of": "2026-09-11T16:26:19Z",
+  "age": "3 hours old",
+  "source": "cache",
+  "stale": false
+}
+```
+
+Past `TRUELAYER_MAX_AGE_HOURS` (default 25 — a daily sync plus slack) `stale`
+flips to true and a `warning` field is added, so an agent reporting a balance
+can say how current it is rather than implying it is live.
+
+**When you need live figures** — you just sent a payment and want to know if it
+landed — every tool takes `fresh=true`, which bypasses the cache, queries the
+bank, and writes the result back:
+
+```
+get_balance(account_id="...", fresh=true)
+get_transactions(account_id="...", fresh=true)   # also pulls pending
+```
+
+`fresh=true` on transactions needs a specific `account_id`: a live refresh is
+per-account, not a whole-portfolio sweep. It pulls pending transactions too,
+which is usually what "did my payment go through" actually means.
+
+### Scheduling the daily sync
+
+On macOS, a launchd agent or a cron line is enough:
+
+```
+17 6 * * *  cd ~/dev/openbanking-mcp && .venv/bin/open-banking-mcp sync >> ~/.open-banking-mcp/sync.log 2>&1
+```
+
+## MCP tools
+
+| Tool | What it does |
+|---|---|
+| `list_banks` | Connected banks and last sync time |
+| `list_accounts` / `list_cards` | Accounts and cards |
+| `get_balance` / `get_card_balance` | One balance |
+| `get_balances` | Every balance plus per-currency totals |
+| `get_transactions` | Query by date range, account, or text search |
+| `list_standing_orders` / `list_direct_debits` | Recurring payments |
+| `get_identity` | Account holder details |
+| `sync_now` | Refresh the whole cache |
+| `cache_status` | What the cache holds |
+
+All except `list_banks`, `sync_now` and `cache_status` accept `fresh`.
+
+### Connecting it to Claude
+
+```json
+{
+  "mcpServers": {
+    "open-banking": {
+      "command": "/absolute/path/to/.venv/bin/open-banking-mcp-server",
+      "env": {
+        "TRUELAYER_CLIENT_ID": "sandbox-yourapp",
+        "TRUELAYER_CLIENT_SECRET": "...",
+        "TRUELAYER_ENV": "sandbox"
+      }
+    }
+  }
+}
 ```
 
 ## Consent expiry

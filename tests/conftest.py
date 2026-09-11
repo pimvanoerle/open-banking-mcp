@@ -14,4 +14,8 @@ def settings(tmp_path):
         providers="uk-cs-mock",
         token_file=tmp_path / "tokens.json",
         use_keyring=False,
+        cache_file=tmp_path / "cache.db",
+        max_age_hours=25.0,
+        history_days=365,
+        psu_ip=None,
     )

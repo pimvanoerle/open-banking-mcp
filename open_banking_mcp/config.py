@@ -46,6 +46,10 @@ class Settings:
     providers: str
     token_file: Path | None
     use_keyring: bool
+    cache_file: Path | None
+    max_age_hours: float
+    history_days: int
+    psu_ip: str | None
 
     @property
     def auth_base_url(self) -> str:
@@ -78,6 +82,16 @@ def load_settings() -> Settings:
         )
 
     token_file = os.environ.get("TRUELAYER_TOKEN_FILE", "").strip()
+    cache_file = os.environ.get("TRUELAYER_CACHE_FILE", "").strip()
+
+    def _number(name: str, default: float, cast):
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return cast(raw)
+        except ValueError:
+            raise ConfigError(f"{name} must be a number, got {raw!r}")
 
     return Settings(
         client_id=_require("TRUELAYER_CLIENT_ID"),
@@ -92,4 +106,11 @@ def load_settings() -> Settings:
         # An explicit token file means the user asked for file storage.
         use_keyring=not token_file
         and os.environ.get("TRUELAYER_USE_KEYRING", "1").strip() not in ("0", "false"),
+        cache_file=Path(cache_file).expanduser() if cache_file else None,
+        # A daily sync plus an hour of slack before data is called stale.
+        max_age_hours=_number("TRUELAYER_MAX_AGE_HOURS", 25.0, float),
+        history_days=int(_number("TRUELAYER_HISTORY_DAYS", 365, int)),
+        # Sending the end user's IP lifts TrueLayer's unattended-caller
+        # throttle, so only set it for genuinely user-present calls.
+        psu_ip=os.environ.get("TRUELAYER_PSU_IP", "").strip() or None,
     )
