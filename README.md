@@ -57,7 +57,8 @@ macOS Keychain (or a `0600` JSON file on systems without a keyring).
 
 In the sandbox, choose the mock bank and log in with username `john`, password
 `doe` — `john1`/`doe1` through `john100`/`doe100` also work for testing
-different account shapes.
+different account shapes. Note that the sandbox reports its provider id as
+`mock`, not `uk-cs-mock`, so that is the name `status` and `logout` expect.
 
 ```bash
 open-banking-mcp status          # connected banks + consent countdown

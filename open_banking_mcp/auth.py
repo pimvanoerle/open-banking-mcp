@@ -215,7 +215,9 @@ async def authorize(
     verifier, challenge = _pkce_pair() if use_pkce else (None, None)
     url = build_auth_url(settings, state=state, code_challenge=challenge)
 
-    print(f"Opening your browser to connect a bank...\n\n  {url}\n")
+    # flush=True: stdout is block-buffered when this is piped or run
+    # non-interactively, which would hide the URL until the flow ends.
+    print(f"Opening your browser to connect a bank...\n\n  {url}\n", flush=True)
     if open_browser:
         webbrowser.open(url)
 
@@ -235,7 +237,8 @@ async def authorize(
     if not payload.get("refresh_token"):
         print(
             "Warning: no refresh token was returned. Without 'offline_access' in "
-            "TRUELAYER_SCOPES this connection will stop working in an hour."
+            "TRUELAYER_SCOPES this connection will stop working in an hour.",
+            flush=True,
         )
 
     provider_id = await identify_provider(settings, payload["access_token"])
@@ -286,7 +289,9 @@ class TokenManager:
                 connected_at=token.connected_at,
             )
             if not refreshed.refresh_token:
-                # Some providers only rotate sometimes; keep what still works.
+                # Verified against the TrueLayer sandbox: a refresh response
+                # often omits refresh_token entirely rather than rotating it.
+                # Dropping it here would break every subsequent refresh.
                 refreshed = refreshed.model_copy(
                     update={"refresh_token": token.refresh_token}
                 )
