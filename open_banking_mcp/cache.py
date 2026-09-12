@@ -74,6 +74,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _restrict(path: Path, mode: int) -> None:
+    """Tighten permissions, ignoring filesystems that don't support it."""
+    try:
+        if path.exists():
+            path.chmod(mode)
+    except OSError:
+        pass
+
+
 def parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -88,12 +97,16 @@ class Cache:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or DEFAULT_DIR / "cache.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # This file holds real balances, transaction history, account numbers
+        # and identity data. SQLite would otherwise create it 0644.
+        _restrict(self.path.parent, 0o700)
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+        _restrict(self.path, 0o600)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -104,6 +117,9 @@ class Cache:
             conn.commit()
         finally:
             conn.close()
+            # Journal and WAL side-cars hold the same data as the db itself.
+            for suffix in ("-journal", "-wal", "-shm"):
+                _restrict(self.path.with_name(self.path.name + suffix), 0o600)
 
     # -- snapshots (small collections stored whole) ------------------------
 

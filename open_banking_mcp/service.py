@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .cache import Cache
-from .client import TrueLayerClient, TrueLayerError
+from .client import RateLimited, TrueLayerClient, TrueLayerError
 
 # How far back a sync pulls on a first run.
 DEFAULT_HISTORY_DAYS = 365
@@ -78,6 +78,7 @@ class SyncReport:
     transactions: int = 0
     pending: int = 0
     errors: list[str] = field(default_factory=list)
+    rate_limited: bool = False
 
     @property
     def ok(self) -> bool:
@@ -277,11 +278,20 @@ class DataService:
                     hid = holder.get("account_id")
                     if not hid:
                         continue
-                    report_counts = await self._sync_holder(
-                        provider_id, holder_kind, hid, start, end, report
-                    )
-                    report.transactions += report_counts[0]
-                    report.pending += report_counts[1]
+                    try:
+                        settled, pending = await self._sync_holder(
+                            provider_id, holder_kind, hid, start, end, report
+                        )
+                    except RateLimited as exc:
+                        # Carrying on would burn the remaining allowance and
+                        # still fail. Keep what we already wrote and stop.
+                        report.errors.append(str(exc))
+                        report.rate_limited = True
+                        break
+                    report.transactions += settled
+                    report.pending += pending
+                if report.rate_limited:
+                    break
 
             self._cache.finish_run(
                 run_id,
@@ -307,6 +317,8 @@ class DataService:
             self._cache.put_snapshot(
                 provider_id, bal_kind, await bal_call(provider_id, hid), key=hid
             )
+        except RateLimited:
+            raise
         except TrueLayerError as exc:
             report.errors.append(f"{bal_kind}[{hid[:8]}]: {exc}")
 
@@ -318,6 +330,8 @@ class DataService:
             rows = await tx_call(provider_id, hid, from_date=start, to_date=end)
             self._cache.put_transactions(provider_id, kind, hid, rows)
             settled_n = len(rows)
+        except RateLimited:
+            raise
         except TrueLayerError as exc:
             report.errors.append(f"transactions[{hid[:8]}]: {exc}")
 
@@ -329,6 +343,8 @@ class DataService:
             rows = await pend_call(provider_id, hid)
             self._cache.put_transactions(provider_id, kind, hid, rows, is_pending=True)
             pending_n = len(rows)
+        except RateLimited:
+            raise
         except TrueLayerError as exc:
             report.errors.append(f"pending[{hid[:8]}]: {exc}")
 
@@ -341,6 +357,8 @@ class DataService:
                     self._cache.put_snapshot(
                         provider_id, extra, await call(provider_id, hid), key=hid
                     )
+                except RateLimited:
+                    raise
                 except TrueLayerError as exc:
                     report.errors.append(f"{extra}[{hid[:8]}]: {exc}")
 

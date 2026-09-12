@@ -24,6 +24,31 @@ class TrueLayerError(RuntimeError):
         self.path = path
 
 
+class RateLimited(TrueLayerError):
+    """TrueLayer throttled us.
+
+    Production limits are far tighter than the sandbox's (which has none).
+    Requests without an X-PSU-IP header -- i.e. anything running unattended --
+    get the strictest treatment, which is precisely what a scheduled sync is.
+    """
+
+    def __init__(self, path: str, body: str, retry_after: float | None) -> None:
+        super().__init__(429, path, body)
+        self.retry_after = retry_after
+
+    def __str__(self) -> str:
+        wait = (
+            f" Retry after {self.retry_after:.0f}s."
+            if self.retry_after
+            else ""
+        )
+        return (
+            f"Rate limited by TrueLayer on {self.path}.{wait} "
+            f"Unattended calls are throttled hardest; set TRUELAYER_PSU_IP for "
+            f"user-present requests, or sync less often."
+        )
+
+
 def _as_date(value: date | datetime | str | None) -> str | None:
     if value is None:
         return None
@@ -75,6 +100,13 @@ class TrueLayerClient:
                     headers=headers,
                     params={k: v for k, v in query.items() if v is not None},
                 )
+                if response.status_code == 429:
+                    header = response.headers.get("retry-after")
+                    raise RateLimited(
+                        path,
+                        response.text,
+                        float(header) if header and header.isdigit() else None,
+                    )
                 if response.status_code >= 400:
                     raise TrueLayerError(response.status_code, path, response.text)
 
