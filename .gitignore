@@ -13,3 +13,14 @@ build/
 !.env.example
 tokens.json
 cache.db
+
+# Editor debris. Vim names its swap file for ".env.production" as
+# "..env.production.swp" -- the leading dot dodges the .env.* rule above,
+# and a swap file holds the whole buffer, secret included.
+*.swp
+*.swo
+*.swn
+.*.sw[a-p]
+*~
+.netrwhist
+.DS_Store
