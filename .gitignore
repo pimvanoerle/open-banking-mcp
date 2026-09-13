@@ -6,5 +6,10 @@ venv/
 dist/
 build/
 .pytest_cache/
+# Every env file, not just ".env" -- .env.production holds a live client
+# secret and this repo is public.
 .env
+.env.*
+!.env.example
 tokens.json
+cache.db
