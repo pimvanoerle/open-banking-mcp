@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_DIR = Path.home() / ".open-banking-mcp"
+
 SANDBOX = "sandbox"
 PRODUCTION = "production"
 
@@ -106,7 +108,13 @@ def load_settings() -> Settings:
         # An explicit token file means the user asked for file storage.
         use_keyring=not token_file
         and os.environ.get("TRUELAYER_USE_KEYRING", "1").strip() not in ("0", "false"),
-        cache_file=Path(cache_file).expanduser() if cache_file else None,
+        # Separate database per environment: mock transactions must never be
+        # queryable alongside real ones.
+        cache_file=(
+            Path(cache_file).expanduser()
+            if cache_file
+            else DEFAULT_DIR / f"cache-{env}.db"
+        ),
         # A daily sync plus an hour of slack before data is called stale.
         max_age_hours=_number("TRUELAYER_MAX_AGE_HOURS", 25.0, float),
         history_days=int(_number("TRUELAYER_HISTORY_DAYS", 365, int)),

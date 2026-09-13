@@ -80,37 +80,62 @@ class TokenStore(Protocol):
 
 
 class _ProviderIndex:
-    """Plaintext list of connected provider ids. Contains no secrets."""
+    """Plaintext list of connected provider ids, grouped by environment.
 
-    def __init__(self, path: Path) -> None:
+    Contains no secrets. Grouping by environment matters: a sandbox
+    connection showing up in production would let a mock bank's balance be
+    reported as real money.
+    """
+
+    def __init__(self, path: Path, env: str) -> None:
         self.path = path
+        self.env = env
+
+    def _read_all(self) -> dict[str, list[str]]:
+        if not self.path.exists():
+            return {}
+        try:
+            data = json.loads(self.path.read_text())
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(data, list):
+            # Pre-namespacing format: a bare list written before environments
+            # were separated. Those connections were sandbox-only.
+            return {"sandbox": data}
+        return data if isinstance(data, dict) else {}
 
     def read(self) -> list[str]:
-        if not self.path.exists():
-            return []
-        try:
-            return sorted(set(json.loads(self.path.read_text())))
-        except (json.JSONDecodeError, TypeError):
-            return []
+        return sorted(set(self._read_all().get(self.env, [])))
 
     def add(self, provider_id: str) -> None:
-        current = set(self.read())
+        data = self._read_all()
+        current = set(data.get(self.env, []))
         current.add(provider_id)
-        self._write(sorted(current))
+        data[self.env] = sorted(current)
+        self._write(data)
 
     def remove(self, provider_id: str) -> None:
-        self._write([p for p in self.read() if p != provider_id])
+        data = self._read_all()
+        data[self.env] = [p for p in data.get(self.env, []) if p != provider_id]
+        self._write(data)
 
-    def _write(self, providers: list[str]) -> None:
+    def _write(self, data: dict[str, list[str]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(providers, indent=2))
+        self.path.write_text(json.dumps(data, indent=2))
 
 
 class KeyringTokenStore:
-    """Stores each provider's tokens as one keychain entry."""
+    """Stores each provider's tokens as one keychain entry, per environment."""
 
-    def __init__(self, index_path: Path | None = None) -> None:
-        self._index = _ProviderIndex(index_path or DEFAULT_DIR / "providers.json")
+    def __init__(self, env: str = "sandbox", index_path: Path | None = None) -> None:
+        self.env = env
+        self._index = _ProviderIndex(
+            index_path or DEFAULT_DIR / "providers.json", env
+        )
+
+    def _account(self, provider_id: str) -> str:
+        """Keychain account name. Namespaced so live and sandbox never mix."""
+        return f"{self.env}:{provider_id}"
 
     @staticmethod
     def _keyring():
@@ -124,21 +149,44 @@ class KeyringTokenStore:
         return keyring
 
     def get(self, provider_id: str) -> Token | None:
-        raw = self._keyring().get_password(KEYRING_SERVICE, provider_id)
+        keyring = self._keyring()
+        raw = keyring.get_password(KEYRING_SERVICE, self._account(provider_id))
+        if not raw:
+            raw = self._migrate_legacy(provider_id)
         if not raw:
             return None
         return Token.model_validate_json(raw)
 
+    def _migrate_legacy(self, provider_id: str) -> str | None:
+        """Adopt an entry written before keys were namespaced by environment.
+
+        Those predate the sandbox/production split, so they can only have been
+        sandbox; claiming one as production could report a mock balance as real
+        money.
+        """
+        if self.env != "sandbox":
+            return None
+        keyring = self._keyring()
+        raw = keyring.get_password(KEYRING_SERVICE, provider_id)
+        if not raw:
+            return None
+        keyring.set_password(KEYRING_SERVICE, self._account(provider_id), raw)
+        try:
+            keyring.delete_password(KEYRING_SERVICE, provider_id)
+        except Exception:
+            pass
+        return raw
+
     def put(self, token: Token) -> None:
         self._keyring().set_password(
-            KEYRING_SERVICE, token.provider_id, token.model_dump_json()
+            KEYRING_SERVICE, self._account(token.provider_id), token.model_dump_json()
         )
         self._index.add(token.provider_id)
 
     def delete(self, provider_id: str) -> None:
         keyring = self._keyring()
         try:
-            keyring.delete_password(KEYRING_SERVICE, provider_id)
+            keyring.delete_password(KEYRING_SERVICE, self._account(provider_id))
         except Exception:
             # Already gone, or the backend has nothing to delete. Either way the
             # index entry below is what matters.
@@ -150,10 +198,14 @@ class KeyringTokenStore:
 
 
 class JsonFileTokenStore:
-    """Stores every provider's tokens in one 0600 JSON file."""
+    """Stores every provider's tokens in one 0600 JSON file, keyed by env."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, env: str = "sandbox") -> None:
         self.path = path or DEFAULT_DIR / "tokens.json"
+        self.env = env
+
+    def _key(self, provider_id: str) -> str:
+        return f"{self.env}:{provider_id}"
 
     def _read_all(self) -> dict[str, dict]:
         if not self.path.exists():
@@ -171,29 +223,32 @@ class JsonFileTokenStore:
             json.dump(data, handle, indent=2, default=str)
 
     def get(self, provider_id: str) -> Token | None:
-        raw = self._read_all().get(provider_id)
+        raw = self._read_all().get(self._key(provider_id))
         return Token.model_validate(raw) if raw else None
 
     def put(self, token: Token) -> None:
         data = self._read_all()
-        data[token.provider_id] = json.loads(token.model_dump_json())
+        data[self._key(token.provider_id)] = json.loads(token.model_dump_json())
         self._write_all(data)
 
     def delete(self, provider_id: str) -> None:
         data = self._read_all()
-        if data.pop(provider_id, None) is not None:
+        if data.pop(self._key(provider_id), None) is not None:
             self._write_all(data)
 
     def providers(self) -> list[str]:
-        return sorted(self._read_all())
+        prefix = f"{self.env}:"
+        return sorted(
+            key[len(prefix):] for key in self._read_all() if key.startswith(prefix)
+        )
 
 
 def build_store(settings) -> TokenStore:
     """Pick a backend from settings, falling back to a file if no keyring works."""
     if not settings.use_keyring:
-        return JsonFileTokenStore(settings.token_file)
+        return JsonFileTokenStore(settings.token_file, settings.env)
 
-    store = KeyringTokenStore()
+    store = KeyringTokenStore(settings.env)
     try:
         import keyring
         from keyring.backends.fail import Keyring as FailKeyring
@@ -201,5 +256,5 @@ def build_store(settings) -> TokenStore:
         if isinstance(keyring.get_keyring(), FailKeyring):
             raise StorageError("no usable keyring backend")
     except (ImportError, StorageError):
-        return JsonFileTokenStore(settings.token_file)
+        return JsonFileTokenStore(settings.token_file, settings.env)
     return store
