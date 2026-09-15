@@ -120,6 +120,22 @@ def fetch_new_transactions(since: str | None) -> list[dict]:
     finally:
         conn.close()
 
+def fetch_transactions_occurring_since(since: str) -> list[dict]:
+    """Transactions whose *transaction date* falls after `since` — unlike
+    fetch_new_transactions, not affected by when a bulk/backfill sync happened."""
+    if not CACHE_DB.exists():
+        return []
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM transactions WHERE timestamp >= ? AND is_pending = 0"
+            " ORDER BY timestamp DESC",
+            (since,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
 def fetch_balance_snapshots() -> list[dict]:
     """Return all balance snapshots, newest first."""
     if not CACHE_DB.exists():
@@ -176,7 +192,7 @@ def check_transactions(txs: list[dict], state: dict) -> tuple[list[str], list[st
     now = datetime.now(timezone.utc)
     cutoff_24h = (now - timedelta(hours=24)).isoformat()
     merchant_counts: dict[str, int] = {}
-    for tx in fetch_new_transactions(cutoff_24h):
+    for tx in fetch_transactions_occurring_since(cutoff_24h):
         m = _payee(tx)
         merchant_counts[m] = merchant_counts.get(m, 0) + 1
 
