@@ -22,6 +22,10 @@ import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from open_banking_mcp.auth import TokenManager
+from open_banking_mcp.config import load_settings
+from open_banking_mcp.storage import build_store
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 HOME = Path.home()
@@ -35,6 +39,10 @@ TIER1_NEW_PAYEE = 100.0   # £ — new merchant, lower bar
 TIER1_REPEAT_N = 3        # same merchant this many times in 24h
 
 TIER2_BALANCE_DROP = 300.0  # £ drop in available balance in 24h
+
+CONSENT_AMBER_DAYS = 21
+CONSENT_RED_DAYS = 7
+CONSENT_AMBER_NUDGE_INTERVAL = timedelta(days=3)  # red nudges every run (script is daily)
 
 # ── Slack ─────────────────────────────────────────────────────────────────────
 
@@ -267,6 +275,52 @@ def check_balance_drop(state: dict) -> list[str]:
         ]
     return []
 
+def check_consent_expiry(state: dict) -> list[str]:
+    """Nudge before a bank consent lapses. Amber (<=21 days) nudges every
+    CONSENT_AMBER_NUDGE_INTERVAL; red (<=7 days) nudges every run since this
+    script itself only runs once a day. Clears its own throttle record once
+    a provider is renewed, so the next expiry cycle nudges fresh."""
+    settings, store = load_settings(), None
+    try:
+        store = build_store(settings)
+        rows = TokenManager(settings, store).consent_status()
+    except Exception as exc:
+        return [f"⚠️ Could not check bank consent expiry: {exc}"]
+
+    nudges = state.setdefault("consent_nudges", {})
+    now = datetime.now(timezone.utc)
+    messages = []
+
+    seen_providers = {provider_id for provider_id, _, _ in rows}
+    for stale in list(nudges):
+        if stale not in seen_providers:
+            del nudges[stale]
+
+    for provider_id, days_left, expires_at in rows:
+        if days_left <= CONSENT_RED_DAYS:
+            tier = "red"
+        elif days_left <= CONSENT_AMBER_DAYS:
+            tier = "amber"
+        else:
+            nudges.pop(provider_id, None)
+            continue
+
+        record = nudges.get(provider_id)
+        if tier == "amber" and record and record.get("tier") == "amber":
+            last_sent = datetime.fromisoformat(record["last_sent"])
+            if now - last_sent < CONSENT_AMBER_NUDGE_INTERVAL:
+                continue
+        # red: nudge every run (once/day, since the script itself is daily)
+
+        icon = "🚨" if tier == "red" else "⚠️"
+        messages.append(
+            f"{icon} *Bank consent expiring*: {provider_id} — {days_left} day(s) left "
+            f"(until {expires_at:%Y-%m-%d}). Run `open-banking-mcp auth` to renew."
+        )
+        nudges[provider_id] = {"tier": tier, "last_sent": now.isoformat()}
+
+    return messages
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -297,6 +351,13 @@ def main() -> None:
         print(f"Added {len(tier2_msgs)} Tier 2 alert(s) to pending digest")
     else:
         print("No Tier 2 alerts")
+
+    consent_msgs = check_consent_expiry(state)
+    if consent_msgs:
+        slack_send("\n".join(consent_msgs))
+        print(f"Sent {len(consent_msgs)} consent-expiry nudge(s) to Slack")
+    else:
+        print("No consent-expiry nudges due")
 
     state["last_checked_at"] = now_iso
     save_state(state)
