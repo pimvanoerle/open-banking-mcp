@@ -38,7 +38,7 @@ TIER1_AMOUNT = 500.0      # £ — absolute value, both incoming and outgoing
 TIER1_NEW_PAYEE = 100.0   # £ — new merchant, lower bar
 TIER1_REPEAT_N = 3        # same merchant this many times in 24h
 
-TIER2_BALANCE_DROP = 300.0  # £ drop in available balance in 24h
+TIER2_BALANCE_CHANGE = 500.0  # £ swing (either direction) in available balance since last sync
 
 CONSENT_AMBER_DAYS = 21
 CONSENT_RED_DAYS = 7
@@ -252,8 +252,8 @@ def check_transactions(txs: list[dict], state: dict) -> tuple[list[str], list[st
 
     return tier1, tier2
 
-def check_balance_drop(state: dict) -> list[str]:
-    """Tier 2: flag if available balance dropped more than £300 since last check."""
+def check_balance_change(state: dict) -> list[str]:
+    """Tier 2: flag if available balance swung more than £500 since last sync (either direction)."""
     snapshots = fetch_balance_snapshots()
     if len(snapshots) < 2:
         return []
@@ -261,16 +261,24 @@ def check_balance_drop(state: dict) -> list[str]:
     latest = snapshots[0]
     previous = snapshots[1]
 
+    # Dedup: only alert once per latest snapshot so multiple script runs don't repeat
+    latest_synced_at = latest.get("_synced_at", "")
+    if state.get("last_balance_alert_snapshot") == latest_synced_at:
+        return []
+
     prev_avail = previous.get("available") if isinstance(previous, dict) else None
     curr_avail = latest.get("available") if isinstance(latest, dict) else None
 
     if prev_avail is None or curr_avail is None:
         return []
 
-    drop = prev_avail - curr_avail
-    if drop >= TIER2_BALANCE_DROP:
+    change = curr_avail - prev_avail  # positive = rose, negative = fell
+    if abs(change) >= TIER2_BALANCE_CHANGE:
+        direction = "fell" if change < 0 else "rose"
+        icon = "📉" if change < 0 else "📈"
+        state["last_balance_alert_snapshot"] = latest_synced_at
         return [
-            f"📉 *Balance drop*: available balance fell by £{drop:,.2f} since yesterday "
+            f"{icon} *Balance {direction}*: available balance {direction} by £{abs(change):,.2f} since last sync "
             f"(£{prev_avail:,.2f} → £{curr_avail:,.2f})"
         ]
     return []
@@ -336,7 +344,7 @@ def main() -> None:
     print(f"Checking {len(txs)} new transaction(s) since {state.get('last_checked_at') or 'first run'}")
 
     tier1_msgs, _ = check_transactions(txs, state)
-    tier2_msgs = check_balance_drop(state)
+    tier2_msgs = check_balance_change(state)
 
     if tier1_msgs:
         lines = ["🦀 *Banking alert*"] + tier1_msgs
