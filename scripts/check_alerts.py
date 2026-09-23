@@ -144,24 +144,41 @@ def fetch_transactions_occurring_since(since: str) -> list[dict]:
     finally:
         conn.close()
 
-def fetch_balance_snapshots() -> list[dict]:
-    """Return all balance snapshots, newest first."""
+def fetch_balance_snapshots() -> dict[str, dict]:
+    """Return the latest balance snapshot per account (keyed by account_id).
+
+    The snapshots table upserts one row per (provider_id, kind, key), so there
+    is never more than one row per account here — no history is kept in the
+    DB itself. Callers must diff against a previous value they stored
+    themselves (see check_balance_change), never against another row from
+    this table, since two rows here are always two *different* accounts.
+    """
     if not CACHE_DB.exists():
-        return []
+        return {}
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT payload, synced_at FROM snapshots WHERE kind = 'balance'"
-            " ORDER BY synced_at DESC"
+            "SELECT key, payload, synced_at FROM snapshots WHERE kind = 'balance'"
         ).fetchall()
-        out = []
+        out = {}
         for r in rows:
             data = json.loads(r["payload"])
             data["_synced_at"] = r["synced_at"]
-            out.append(data)
+            out[r["key"]] = data
         return out
     finally:
         conn.close()
+
+def fetch_account_names() -> dict[str, str]:
+    """Map account_id -> display_name from the latest accounts snapshot."""
+    rows = fetch_snapshot("accounts")
+    if not rows:
+        return {}
+    try:
+        accounts = rows[0]["payload"]
+    except (KeyError, IndexError):
+        return {}
+    return {a["account_id"]: a.get("display_name", a["account_id"]) for a in accounts}
 
 def fetch_snapshot(kind: str) -> list[dict]:
     if not CACHE_DB.exists():
@@ -253,35 +270,44 @@ def check_transactions(txs: list[dict], state: dict) -> tuple[list[str], list[st
     return tier1, tier2
 
 def check_balance_change(state: dict) -> list[str]:
-    """Tier 2: flag if available balance swung more than £500 since last sync (either direction)."""
+    """Tier 2: flag if an account's available balance swung more than £500
+    since the last check (either direction).
+
+    Compares each account only against its *own* last-seen balance, stored in
+    `state["balances_by_account"]` — the DB's snapshots table keeps just one
+    row per account (no history), so diffing "the two latest rows" as before
+    silently compared two different accounts against each other.
+    """
     snapshots = fetch_balance_snapshots()
-    if len(snapshots) < 2:
+    if not snapshots:
         return []
 
-    latest = snapshots[0]
-    previous = snapshots[1]
+    names = fetch_account_names()
+    prev_by_account: dict[str, float] = state.setdefault("balances_by_account", {})
+    messages = []
 
-    # Dedup: only alert once per latest snapshot so multiple script runs don't repeat
-    latest_synced_at = latest.get("_synced_at", "")
-    if state.get("last_balance_alert_snapshot") == latest_synced_at:
-        return []
+    for account_id, snap in snapshots.items():
+        curr_avail = snap.get("available")
+        if curr_avail is None:
+            continue
 
-    prev_avail = previous.get("available") if isinstance(previous, dict) else None
-    curr_avail = latest.get("available") if isinstance(latest, dict) else None
+        prev_avail = prev_by_account.get(account_id)
+        prev_by_account[account_id] = curr_avail
 
-    if prev_avail is None or curr_avail is None:
-        return []
+        if prev_avail is None:
+            continue  # first time seeing this account — nothing to diff yet
 
-    change = curr_avail - prev_avail  # positive = rose, negative = fell
-    if abs(change) >= TIER2_BALANCE_CHANGE:
-        direction = "fell" if change < 0 else "rose"
-        icon = "📉" if change < 0 else "📈"
-        state["last_balance_alert_snapshot"] = latest_synced_at
-        return [
-            f"{icon} *Balance {direction}*: available balance {direction} by £{abs(change):,.2f} since last sync "
-            f"(£{prev_avail:,.2f} → £{curr_avail:,.2f})"
-        ]
-    return []
+        change = curr_avail - prev_avail
+        if abs(change) >= TIER2_BALANCE_CHANGE:
+            direction = "fell" if change < 0 else "rose"
+            icon = "📉" if change < 0 else "📈"
+            name = names.get(account_id, account_id)
+            messages.append(
+                f"{icon} *Balance {direction}* ({name}): available balance {direction} by "
+                f"£{abs(change):,.2f} since last check (£{prev_avail:,.2f} → £{curr_avail:,.2f})"
+            )
+
+    return messages
 
 def check_consent_expiry(state: dict) -> list[str]:
     """Nudge before a bank consent lapses. Amber (<=21 days) nudges every
