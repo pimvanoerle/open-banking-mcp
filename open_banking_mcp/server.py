@@ -130,32 +130,45 @@ async def get_card_balance(
 @mcp.tool()
 async def get_balances(provider_id: str | None = None, fresh: bool = False) -> dict:
     """Get balances for every account and card at once -- the 'how am I doing' view."""
-    svc, provider = service(), _one_provider(provider_id)
-    accounts = (await svc.accounts(provider, fresh=fresh)).data or []
-    cards = (await svc.cards(provider, fresh=fresh)).data or []
+    svc = service()
+    # No provider named: span every connected bank rather than erroring.
+    if provider_id:
+        providers = [provider_id]
+    else:
+        providers = _providers()
+        if not providers:
+            raise ValueError(
+                "No banks are connected. Run 'open-banking-mcp auth' in a terminal."
+            )
 
     rows, oldest = [], None
-    for holder, kind in [(a, "account") for a in accounts] + [(c, "card") for c in cards]:
-        hid = holder.get("account_id")
-        result = await (
-            svc.card_balance(provider, hid, fresh=fresh)
-            if kind == "card"
-            else svc.balance(provider, hid, fresh=fresh)
-        )
-        balance = result.data or {}
-        rows.append(
-            {
-                "kind": kind,
-                "id": hid,
-                "name": holder.get("display_name") or holder.get("card_network"),
-                "currency": balance.get("currency"),
-                "current": balance.get("current"),
-                "available": balance.get("available"),
-                "credit_limit": balance.get("credit_limit"),
-            }
-        )
-        if result.as_of and (oldest is None or result.as_of < oldest):
-            oldest = result.as_of
+    for provider in providers:
+        accounts = (await svc.accounts(provider, fresh=fresh)).data or []
+        cards = (await svc.cards(provider, fresh=fresh)).data or []
+        for holder, kind in [(a, "account") for a in accounts] + [
+            (c, "card") for c in cards
+        ]:
+            hid = holder.get("account_id")
+            result = await (
+                svc.card_balance(provider, hid, fresh=fresh)
+                if kind == "card"
+                else svc.balance(provider, hid, fresh=fresh)
+            )
+            balance = result.data or {}
+            rows.append(
+                {
+                    "provider_id": provider,
+                    "kind": kind,
+                    "id": hid,
+                    "name": holder.get("display_name") or holder.get("card_network"),
+                    "currency": balance.get("currency"),
+                    "current": balance.get("current"),
+                    "available": balance.get("available"),
+                    "credit_limit": balance.get("credit_limit"),
+                }
+            )
+            if result.as_of and (oldest is None or result.as_of < oldest):
+                oldest = result.as_of
 
     totals: dict[str, float] = {}
     for row in rows:
